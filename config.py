@@ -1,4 +1,5 @@
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,7 +17,10 @@ if not REQUIRED_CHAT_ID_RAW:
 try:
     REQUIRED_CHAT_ID: int | str = int(REQUIRED_CHAT_ID_RAW)
 except ValueError:
-    # Поддерживаем @username для публичных чатов
     REQUIRED_CHAT_ID = REQUIRED_CHAT_ID_RAW
 
+# PostgreSQL (Neon) or SQLite.
+# If DATABASE_URL starts with postgres:// or postgresql:// — use asyncpg.
+# Otherwise fall back to SQLite file at DB_PATH.
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DB_PATH = os.getenv("DB_PATH", "rp_bot.db")
