@@ -252,7 +252,7 @@ async def set_username(message: Message, state: FSMContext) -> None:
     await state.update_data(username=username)
     await state.set_state(Form.profile_link)
     await message.answer(
-        "4/4. Скинь <b>ссылку</b> на анкету (например, на пост или Google Doc).\n"
+        "4/4. Скинь <b>ссылку</b> на анкету.\n"
         "Это должна быть именно ссылка — не сам текст анкеты."
     )
 
