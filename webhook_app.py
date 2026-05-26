@@ -95,13 +95,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=lifespan)
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root() -> dict[str, str]:
     bot_username = getattr(app.state, "bot_username", None)
     return {"status": "ok", "bot": f"@{bot_username}" if bot_username else "starting"}
 
 
-@app.get("/healthz")
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 async def healthz() -> dict[str, str]:
     return await root()
 
