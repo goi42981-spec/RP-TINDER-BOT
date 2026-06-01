@@ -551,8 +551,10 @@ async def cb_view_like(cb: CallbackQuery, bot: Bot) -> None:
     await cb.answer()
 
 
-async def _notify_match(bot: Bot, user_a: dict, user_b: dict) -> None:
-    """Отправить уведомление о взаимном лайке обоим + пост в РП-чат."""
+async def _notify_match(
+    bot: Bot, user_a: dict, user_b: dict, post_to_chat: bool = True
+) -> None:
+    """Отправить уведомление о взаимном лайке обоим + (опционально) пост в РП-чат."""
     text_for_a = (
         "🎉 <b>Взаимный лайк!</b>\n\n"
         f"Партнёр: {user_b['username']}\n"
@@ -570,6 +572,9 @@ async def _notify_match(bot: Bot, user_a: dict, user_b: dict) -> None:
             await bot.send_message(uid, text)
         except (TelegramForbiddenError, TelegramBadRequest) as e:
             logger.warning("Не смог отправить уведомление о мэтче user=%s: %s", uid, e)
+
+    if not post_to_chat:
+        return
 
     # Пост в РП-чат с тегом обоих
     chat_text = (
@@ -699,7 +704,7 @@ async def cmd_all_profiles(message: Message) -> None:
         "Под каждой анкетой — кнопки бана/разбана и удаления анкеты.\n"
         "🗑 Удаление убирает анкету без бана (человек может заполнить заново).\n"
         "Также: <code>/ban ID</code> или <code>/ban @ник</code> (и <code>/unban</code>).\n"
-        "💞 Свести двоих: <code>/match ID|@ник  ID|@ник</code> — им придёт взаимный лайк."
+        "💞 Свести двоих: <code>/match ID|@ник  ID|@ник</code> — им в ЛС придёт взаимный лайк."
     )
     for index, profile in enumerate(profiles, start=1):
         await message.answer(
@@ -794,8 +799,8 @@ async def cmd_match(message: Message, bot: Bot) -> None:
     if len(parts) < 3:
         await message.answer(
             "Использование: <code>/match ID|@ник  ID|@ник</code>\n"
-            "Сводит двоих — обоим прилетит взаимный лайк с контактами друг друга, "
-            "будто они сами лайкнули друг друга."
+            "Сводит двоих — обоим в ЛС прилетит взаимный лайк с контактами друг друга, "
+            "будто они сами лайкнули друг друга. В РП-чат ничего не постится."
         )
         return
 
@@ -827,10 +832,10 @@ async def cmd_match(message: Message, bot: Bot) -> None:
 
     await record_swipe(id_a, id_b, "like")
     await record_swipe(id_b, id_a, "like")
-    await _notify_match(bot, profile_a, profile_b)
+    await _notify_match(bot, profile_a, profile_b, post_to_chat=False)
     await message.answer(
         f"💞 Свёл(а): {profile_a['username']} ↔ {profile_b['username']}\n"
-        "Обоим ушёл «взаимный лайк» с контактами друг друга."
+        "Обоим в ЛС ушёл «взаимный лайк» с контактами друг друга (в РП-чат не постилось)."
     )
 
 
