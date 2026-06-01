@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS swipes (
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (from_user_id, to_user_id)
 );
+
+CREATE TABLE IF NOT EXISTS banned (
+    user_id    INTEGER PRIMARY KEY,
+    reason     TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 POSTGRES_SCHEMA = """\
@@ -60,6 +66,12 @@ CREATE TABLE IF NOT EXISTS swipes (
     action       TEXT NOT NULL CHECK(action IN ('like', 'pass')),
     created_at   TIMESTAMPTZ DEFAULT now(),
     PRIMARY KEY (from_user_id, to_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS banned (
+    user_id    BIGINT PRIMARY KEY,
+    reason     TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
 );
 """
 
@@ -99,6 +111,21 @@ class Database(ABC):
 
     @abstractmethod
     async def has_liked_me(self, other_user_id: int, me_user_id: int) -> bool: ...
+
+    @abstractmethod
+    async def list_all_profiles(self) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    async def find_profile_by_username(self, username: str) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    async def ban_user(self, user_id: int, reason: str | None = None) -> None: ...
+
+    @abstractmethod
+    async def unban_user(self, user_id: int) -> bool: ...
+
+    @abstractmethod
+    async def is_banned(self, user_id: int) -> bool: ...
 
 
 # ── SQLite backend ───────────────────────────────────────────────────────────
@@ -157,6 +184,7 @@ class SqliteDatabase(Database):
               AND p.user_id NOT IN (
                   SELECT from_user_id FROM swipes WHERE to_user_id = :me AND action = 'like'
               )
+              AND p.user_id NOT IN (SELECT user_id FROM banned)
               AND (:my_pref = :any_label OR :my_pref = p.char_gender)
               AND (p.preferred_gender = :any_label OR p.preferred_gender = :my_char)
             ORDER BY RANDOM()
@@ -182,6 +210,7 @@ class SqliteDatabase(Database):
               AND p.user_id NOT IN (
                   SELECT to_user_id FROM swipes WHERE from_user_id = :me
               )
+              AND p.user_id NOT IN (SELECT user_id FROM banned)
             ORDER BY s.created_at ASC
             LIMIT 1;
             """,
@@ -198,7 +227,8 @@ class SqliteDatabase(Database):
               AND s.action = 'like'
               AND s.from_user_id NOT IN (
                   SELECT to_user_id FROM swipes WHERE from_user_id = ?
-              );
+              )
+              AND s.from_user_id NOT IN (SELECT user_id FROM banned);
             """,
             (user_id, user_id),
         ) as cur:
@@ -234,6 +264,49 @@ class SqliteDatabase(Database):
             LIMIT 1;
             """,
             (other_user_id, me_user_id),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    async def list_all_profiles(self) -> list[dict[str, Any]]:
+        async with self._conn.execute(
+            """
+            SELECT p.*, (b.user_id IS NOT NULL) AS banned
+            FROM profiles p
+            LEFT JOIN banned b ON b.user_id = p.user_id
+            ORDER BY p.created_at ASC;
+            """,
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(row) for row in rows]
+
+    async def find_profile_by_username(self, username: str) -> dict[str, Any] | None:
+        async with self._conn.execute(
+            "SELECT * FROM profiles WHERE LOWER(username) = LOWER(?)",
+            (username,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def ban_user(self, user_id: int, reason: str | None = None) -> None:
+        await self._conn.execute(
+            """
+            INSERT INTO banned (user_id, reason) VALUES (?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET reason = excluded.reason;
+            """,
+            (user_id, reason),
+        )
+        await self._conn.commit()
+
+    async def unban_user(self, user_id: int) -> bool:
+        cur = await self._conn.execute(
+            "DELETE FROM banned WHERE user_id = ?", (user_id,)
+        )
+        await self._conn.commit()
+        return cur.rowcount > 0
+
+    async def is_banned(self, user_id: int) -> bool:
+        async with self._conn.execute(
+            "SELECT 1 FROM banned WHERE user_id = ? LIMIT 1;", (user_id,)
         ) as cur:
             return await cur.fetchone() is not None
 
@@ -299,6 +372,7 @@ class PostgresDatabase(Database):
               AND p.user_id NOT IN (
                   SELECT from_user_id FROM swipes WHERE to_user_id = $1 AND action = 'like'
               )
+              AND p.user_id NOT IN (SELECT user_id FROM banned)
               AND ($2 = $4 OR $2 = p.char_gender)
               AND (p.preferred_gender = $4 OR p.preferred_gender = $3)
             ORDER BY RANDOM()
@@ -318,6 +392,7 @@ class PostgresDatabase(Database):
               AND p.user_id NOT IN (
                   SELECT to_user_id FROM swipes WHERE from_user_id = $1
               )
+              AND p.user_id NOT IN (SELECT user_id FROM banned)
             ORDER BY s.created_at ASC
             LIMIT 1;
             """,
@@ -333,7 +408,8 @@ class PostgresDatabase(Database):
               AND s.action = 'like'
               AND s.from_user_id NOT IN (
                   SELECT to_user_id FROM swipes WHERE from_user_id = $1
-              );
+              )
+              AND s.from_user_id NOT IN (SELECT user_id FROM banned);
             """,
             user_id,
         )
@@ -366,6 +442,46 @@ class PostgresDatabase(Database):
             LIMIT 1;
             """,
             other_user_id, me_user_id,
+        )
+        return row is not None
+
+    async def list_all_profiles(self) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT p.*, (b.user_id IS NOT NULL) AS banned
+            FROM profiles p
+            LEFT JOIN banned b ON b.user_id = p.user_id
+            ORDER BY p.created_at ASC;
+            """,
+        )
+        return [dict(row) for row in rows]
+
+    async def find_profile_by_username(self, username: str) -> dict[str, Any] | None:
+        row = await self.pool.fetchrow(
+            "SELECT * FROM profiles WHERE LOWER(username) = LOWER($1)",
+            username,
+        )
+        return dict(row) if row else None
+
+    async def ban_user(self, user_id: int, reason: str | None = None) -> None:
+        await self.pool.execute(
+            """
+            INSERT INTO banned (user_id, reason) VALUES ($1, $2)
+            ON CONFLICT(user_id) DO UPDATE SET reason = EXCLUDED.reason;
+            """,
+            user_id, reason,
+        )
+
+    async def unban_user(self, user_id: int) -> bool:
+        result = await self.pool.execute(
+            "DELETE FROM banned WHERE user_id = $1", user_id,
+        )
+        # asyncpg returns a status string like "DELETE 1"
+        return result.rsplit(" ", 1)[-1] != "0"
+
+    async def is_banned(self, user_id: int) -> bool:
+        row = await self.pool.fetchrow(
+            "SELECT 1 FROM banned WHERE user_id = $1 LIMIT 1;", user_id,
         )
         return row is not None
 
@@ -441,6 +557,31 @@ async def get_swipe(from_user_id: int, to_user_id: int) -> str | None:
 async def has_liked_me(other_user_id: int, me_user_id: int) -> bool:
     db = await get_db()
     return await db.has_liked_me(other_user_id, me_user_id)
+
+
+async def list_all_profiles() -> list[dict[str, Any]]:
+    db = await get_db()
+    return await db.list_all_profiles()
+
+
+async def find_profile_by_username(username: str) -> dict[str, Any] | None:
+    db = await get_db()
+    return await db.find_profile_by_username(username)
+
+
+async def ban_user(user_id: int, reason: str | None = None) -> None:
+    db = await get_db()
+    await db.ban_user(user_id, reason)
+
+
+async def unban_user(user_id: int) -> bool:
+    db = await get_db()
+    return await db.unban_user(user_id)
+
+
+async def is_banned(user_id: int) -> bool:
+    db = await get_db()
+    return await db.is_banned(user_id)
 
 
 async def close_db() -> None:
