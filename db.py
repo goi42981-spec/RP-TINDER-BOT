@@ -119,6 +119,9 @@ class Database(ABC):
     async def find_profile_by_username(self, username: str) -> dict[str, Any] | None: ...
 
     @abstractmethod
+    async def delete_profile(self, user_id: int) -> bool: ...
+
+    @abstractmethod
     async def ban_user(self, user_id: int, reason: str | None = None) -> None: ...
 
     @abstractmethod
@@ -286,6 +289,17 @@ class SqliteDatabase(Database):
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+    async def delete_profile(self, user_id: int) -> bool:
+        cur = await self._conn.execute(
+            "DELETE FROM profiles WHERE user_id = ?", (user_id,)
+        )
+        await self._conn.execute(
+            "DELETE FROM swipes WHERE from_user_id = ? OR to_user_id = ?",
+            (user_id, user_id),
+        )
+        await self._conn.commit()
+        return cur.rowcount > 0
 
     async def ban_user(self, user_id: int, reason: str | None = None) -> None:
         await self._conn.execute(
@@ -463,6 +477,19 @@ class PostgresDatabase(Database):
         )
         return dict(row) if row else None
 
+    async def delete_profile(self, user_id: int) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                result = await conn.execute(
+                    "DELETE FROM profiles WHERE user_id = $1", user_id,
+                )
+                await conn.execute(
+                    "DELETE FROM swipes WHERE from_user_id = $1 OR to_user_id = $1",
+                    user_id,
+                )
+        # asyncpg returns a status string like "DELETE 1"
+        return result.rsplit(" ", 1)[-1] != "0"
+
     async def ban_user(self, user_id: int, reason: str | None = None) -> None:
         await self.pool.execute(
             """
@@ -567,6 +594,11 @@ async def list_all_profiles() -> list[dict[str, Any]]:
 async def find_profile_by_username(username: str) -> dict[str, Any] | None:
     db = await get_db()
     return await db.find_profile_by_username(username)
+
+
+async def delete_profile(user_id: int) -> bool:
+    db = await get_db()
+    return await db.delete_profile(user_id)
 
 
 async def ban_user(user_id: int, reason: str | None = None) -> None:

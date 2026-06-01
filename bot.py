@@ -22,6 +22,7 @@ from config import BOT_TOKEN, REQUIRED_CHAT_ID, REQUIRED_CHAT_LINK, is_admin
 from db import (
     ban_user,
     count_pending_likes,
+    delete_profile,
     find_next_candidate,
     find_next_pending_like,
     find_profile_by_username,
@@ -601,14 +602,32 @@ async def _notify_someone_liked(bot: Bot, target_user_id: int, liker_id: int) ->
 
 def admin_profile_keyboard(user_id: int, banned: bool) -> InlineKeyboardMarkup:
     if banned:
-        button = InlineKeyboardButton(
+        ban_button = InlineKeyboardButton(
             text="✅ Разбанить", callback_data=f"admin:unban:{user_id}"
         )
     else:
-        button = InlineKeyboardButton(
+        ban_button = InlineKeyboardButton(
             text="🚫 Забанить", callback_data=f"admin:ban:{user_id}"
         )
-    return InlineKeyboardMarkup(inline_keyboard=[[button]])
+    delete_button = InlineKeyboardButton(
+        text="🗑 Удалить анкету", callback_data=f"admin:delete:{user_id}"
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[ban_button], [delete_button]])
+
+
+def admin_delete_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚠️ Точно удалить", callback_data=f"admin:delok:{user_id}"
+                ),
+                InlineKeyboardButton(
+                    text="↩️ Отмена", callback_data=f"admin:delno:{user_id}"
+                ),
+            ]
+        ]
+    )
 
 
 def admin_profile_card(index: int, profile: dict) -> str:
@@ -677,7 +696,8 @@ async def cmd_all_profiles(message: Message) -> None:
     await message.answer(
         f"<b>Все анкеты ({len(profiles)})</b>\n"
         f"Активных: {active} | Забанено: {banned}\n\n"
-        "Под каждой анкетой — кнопка бана/разбана.\n"
+        "Под каждой анкетой — кнопки бана/разбана и удаления анкеты.\n"
+        "🗑 Удаление убирает анкету без бана (человек может заполнить заново).\n"
         "Также: <code>/ban ID</code> или <code>/ban @ник</code> (и <code>/unban</code>)."
     )
     for index, profile in enumerate(profiles, start=1):
@@ -796,7 +816,9 @@ async def cb_admin_ban(cb: CallbackQuery) -> None:
         await cb.answer("Только для администратора.", show_alert=True)
         return
     parts = cb.data.split(":")
-    if len(parts) != 3 or parts[1] not in ("ban", "unban"):
+    if len(parts) != 3 or parts[1] not in (
+        "ban", "unban", "delete", "delok", "delno"
+    ):
         await cb.answer("Неизвестное действие", show_alert=True)
         return
     action = parts[1]
@@ -804,6 +826,42 @@ async def cb_admin_ban(cb: CallbackQuery) -> None:
         target_id = int(parts[2])
     except ValueError:
         await cb.answer("Невалидный ID", show_alert=True)
+        return
+
+    # --- Удаление анкеты (с подтверждением) ---
+    if action == "delete":
+        await cb.answer()
+        try:
+            await cb.message.edit_reply_markup(
+                reply_markup=admin_delete_confirm_keyboard(target_id)
+            )
+        except TelegramBadRequest:
+            pass
+        return
+
+    if action == "delno":
+        # Отмена удаления — возвращаем обычную клавиатуру.
+        banned = await is_banned(target_id)
+        await cb.answer("Отменено")
+        try:
+            await cb.message.edit_reply_markup(
+                reply_markup=admin_profile_keyboard(target_id, banned)
+            )
+        except TelegramBadRequest:
+            pass
+        return
+
+    if action == "delok":
+        deleted = await delete_profile(target_id)
+        await cb.answer("🗑 Анкета удалена" if deleted else "Анкета не найдена")
+        try:
+            await cb.message.edit_text(
+                ("🗑 <b>Анкета удалена.</b>\n" if deleted else "Анкета уже удалена.\n")
+                + f"ID: <code>{target_id}</code>\n"
+                "Пользователь не забанен — может заново заполнить анкету через /start."
+            )
+        except TelegramBadRequest:
+            pass
         return
 
     if action == "ban":
