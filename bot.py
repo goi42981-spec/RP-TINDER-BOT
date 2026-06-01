@@ -704,7 +704,7 @@ async def cmd_all_profiles(message: Message) -> None:
         "Под каждой анкетой — кнопки бана/разбана и удаления анкеты.\n"
         "🗑 Удаление убирает анкету без бана (человек может заполнить заново).\n"
         "Также: <code>/ban ID</code> или <code>/ban @ник</code> (и <code>/unban</code>).\n"
-        "💞 Свести двоих: <code>/match ID|@ник  ID|@ник</code> — им в ЛС придёт взаимный лайк."
+        "💘 Свести двоих: <code>/match ID|@ник  ID|@ник</code> — обоим в ЛС придёт «тебя лайкнули», решают сами."
     )
     for index, profile in enumerate(profiles, start=1):
         await message.answer(
@@ -799,8 +799,9 @@ async def cmd_match(message: Message, bot: Bot) -> None:
     if len(parts) < 3:
         await message.answer(
             "Использование: <code>/match ID|@ник  ID|@ник</code>\n"
-            "Сводит двоих — обоим в ЛС прилетит взаимный лайк с контактами друг друга, "
-            "будто они сами лайкнули друг друга. В РП-чат ничего не постится."
+            "Каждому в ЛС прилетит «🔔 кто-то лайкнул твою анкету» с анкетой второго "
+            "и кнопками 👍/👎. Они сами решают. Мэтч с контактами будет, только если "
+            "оба лайкнут друг друга."
         )
         return
 
@@ -830,12 +831,14 @@ async def cmd_match(message: Message, bot: Bot) -> None:
         )
         return
 
-    await record_swipe(id_a, id_b, "like")
-    await record_swipe(id_b, id_a, "like")
-    await _notify_match(bot, profile_a, profile_b, post_to_chat=False)
+    # Купидон: показываем каждому анкету другого как «тебя лайкнули» — без записи
+    # лайков. Они сами решают; мэтч появится, только если оба нажмут 👍.
+    await _notify_someone_liked(bot, target_user_id=id_a, liker_id=id_b)
+    await _notify_someone_liked(bot, target_user_id=id_b, liker_id=id_a)
     await message.answer(
-        f"💞 Свёл(а): {profile_a['username']} ↔ {profile_b['username']}\n"
-        "Обоим в ЛС ушёл «взаимный лайк» с контактами друг друга (в РП-чат не постилось)."
+        f"💘 Свожу: {profile_a['username']} ↔ {profile_b['username']}\n"
+        "Обоим в ЛС ушло «кто-то лайкнул твою анкету» с анкетой друг друга. "
+        "Решают сами — мэтч с контактами будет, только если оба лайкнут."
     )
 
 
