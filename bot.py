@@ -698,7 +698,8 @@ async def cmd_all_profiles(message: Message) -> None:
         f"Активных: {active} | Забанено: {banned}\n\n"
         "Под каждой анкетой — кнопки бана/разбана и удаления анкеты.\n"
         "🗑 Удаление убирает анкету без бана (человек может заполнить заново).\n"
-        "Также: <code>/ban ID</code> или <code>/ban @ник</code> (и <code>/unban</code>)."
+        "Также: <code>/ban ID</code> или <code>/ban @ник</code> (и <code>/unban</code>).\n"
+        "💞 Свести двоих: <code>/match ID|@ник  ID|@ник</code> — им придёт взаимный лайк."
     )
     for index, profile in enumerate(profiles, start=1):
         await message.answer(
@@ -783,6 +784,54 @@ async def cmd_unban(message: Message) -> None:
         await message.answer(f"✅ Разбанен: <code>{user_id}</code> ({label}).")
     else:
         await message.answer(f"Пользователь <code>{user_id}</code> и так не в бане.")
+
+
+@router.message(Command("match", "svesti", "pair"))
+async def cmd_match(message: Message, bot: Bot) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer(
+            "Использование: <code>/match ID|@ник  ID|@ник</code>\n"
+            "Сводит двоих — обоим прилетит взаимный лайк с контактами друг друга, "
+            "будто они сами лайкнули друг друга."
+        )
+        return
+
+    id_a, label_a = await _resolve_target(parts[1])
+    id_b, label_b = await _resolve_target(parts[2])
+    if id_a is None:
+        await message.answer(
+            f"Не нашла первого ({label_a}). Укажи числовой ID или @ник из анкеты."
+        )
+        return
+    if id_b is None:
+        await message.answer(
+            f"Не нашла второго ({label_b}). Укажи числовой ID или @ник из анкеты."
+        )
+        return
+    if id_a == id_b:
+        await message.answer("Это один и тот же человек 🙂 Нужны двое разных.")
+        return
+
+    profile_a = await get_profile(id_a)
+    profile_b = await get_profile(id_b)
+    if not profile_a or not profile_b:
+        missing = label_a if not profile_a else label_b
+        await message.answer(
+            f"У {missing} нет анкеты в боте — свести не получится "
+            "(нужны заполненные анкеты у обоих)."
+        )
+        return
+
+    await record_swipe(id_a, id_b, "like")
+    await record_swipe(id_b, id_a, "like")
+    await _notify_match(bot, profile_a, profile_b)
+    await message.answer(
+        f"💞 Свёл(а): {profile_a['username']} ↔ {profile_b['username']}\n"
+        "Обоим ушёл «взаимный лайк» с контактами друг друга."
+    )
 
 
 @router.message(F.forward_origin)
