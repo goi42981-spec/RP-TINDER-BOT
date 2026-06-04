@@ -15,18 +15,25 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    MessageOriginUser,
 )
 
-from config import BOT_TOKEN, REQUIRED_CHAT_ID, REQUIRED_CHAT_LINK
+from config import BOT_TOKEN, REQUIRED_CHAT_ID, REQUIRED_CHAT_LINK, is_admin
 from db import (
+    ban_user,
     count_pending_likes,
+    delete_profile,
     find_next_candidate,
     find_next_pending_like,
+    find_profile_by_username,
     get_profile,
     get_swipe,
     has_liked_me,
     init_db,
+    is_banned,
+    list_all_profiles,
     record_swipe,
+    unban_user,
     upsert_profile,
 )
 
@@ -134,9 +141,29 @@ def not_a_member_text() -> str:
     )
 
 
+BANNED_TEXT = "🚫 Доступ к боту ограничен. Если считаешь это ошибкой — напиши администратору."
+
+
+async def banned_block_message(message: Message) -> bool:
+    """True (и шлёт уведомление), если пользователь забанен."""
+    if await is_banned(message.from_user.id):
+        await message.answer(BANNED_TEXT)
+        return True
+    return False
+
+
+async def banned_block_callback(cb: CallbackQuery) -> bool:
+    if await is_banned(cb.from_user.id):
+        await cb.answer(BANNED_TEXT, show_alert=True)
+        return True
+    return False
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, bot: Bot) -> None:
     await state.clear()
+    if await banned_block_message(message):
+        return
     if not await is_chat_member(bot, message.from_user.id):
         await message.answer(not_a_member_text())
         return
@@ -184,6 +211,8 @@ async def cmd_me(message: Message) -> None:
 
 @router.callback_query(F.data == "fill")
 async def start_filling(cb: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    if await banned_block_callback(cb):
+        return
     if not await is_chat_member(bot, cb.from_user.id):
         await cb.message.answer(not_a_member_text())
         await cb.answer()
@@ -252,7 +281,7 @@ async def set_username(message: Message, state: FSMContext) -> None:
     await state.update_data(username=username)
     await state.set_state(Form.profile_link)
     await message.answer(
-        "4/4. Скинь <b>ссылку</b> на анкету (например, на пост или Google Doc).\n"
+        "4/4. Скинь <b>ссылку</b> на анкету.\n"
         "Это должна быть именно ссылка — не сам текст анкеты."
     )
 
@@ -322,6 +351,8 @@ async def _show_next_pending_like(bot: Bot, chat_id: int, user_id: int) -> None:
 
 @router.message(Command("likes"))
 async def cmd_likes(message: Message, bot: Bot) -> None:
+    if await banned_block_message(message):
+        return
     if not await is_chat_member(bot, message.from_user.id):
         await message.answer(not_a_member_text())
         return
@@ -336,6 +367,8 @@ async def cmd_likes(message: Message, bot: Bot) -> None:
 
 @router.callback_query(F.data == "likes")
 async def cb_likes(cb: CallbackQuery, bot: Bot) -> None:
+    if await banned_block_callback(cb):
+        return
     if not await is_chat_member(bot, cb.from_user.id):
         await cb.message.answer(not_a_member_text())
         await cb.answer()
@@ -356,6 +389,8 @@ async def cb_likes(cb: CallbackQuery, bot: Bot) -> None:
 
 @router.message(Command("find"))
 async def cmd_find(message: Message, bot: Bot) -> None:
+    if await banned_block_message(message):
+        return
     if not await is_chat_member(bot, message.from_user.id):
         await message.answer(not_a_member_text())
         return
@@ -370,6 +405,8 @@ async def cmd_find(message: Message, bot: Bot) -> None:
 
 @router.callback_query(F.data == "find")
 async def cb_find(cb: CallbackQuery, bot: Bot) -> None:
+    if await banned_block_callback(cb):
+        return
     if not await is_chat_member(bot, cb.from_user.id):
         await cb.message.answer(not_a_member_text())
         await cb.answer()
@@ -414,6 +451,8 @@ async def cb_swipe_stop(cb: CallbackQuery) -> None:
 
 @router.callback_query(F.data.startswith("swipe:"))
 async def cb_swipe(cb: CallbackQuery, bot: Bot) -> None:
+    if await banned_block_callback(cb):
+        return
     parts = cb.data.split(":")
     # Поддерживаем старый формат swipe:like:<id> и новый swipe:like:<id>:<source>
     if len(parts) not in (3, 4) or parts[1] not in ("like", "pass"):
@@ -480,6 +519,8 @@ async def cb_swipe(cb: CallbackQuery, bot: Bot) -> None:
 
 @router.callback_query(F.data.startswith("view_like:"))
 async def cb_view_like(cb: CallbackQuery, bot: Bot) -> None:
+    if await banned_block_callback(cb):
+        return
     try:
         liker_id = int(cb.data.split(":", 1)[1])
     except (ValueError, IndexError):
@@ -510,8 +551,10 @@ async def cb_view_like(cb: CallbackQuery, bot: Bot) -> None:
     await cb.answer()
 
 
-async def _notify_match(bot: Bot, user_a: dict, user_b: dict) -> None:
-    """Отправить уведомление о взаимном лайке обоим + пост в РП-чат."""
+async def _notify_match(
+    bot: Bot, user_a: dict, user_b: dict, post_to_chat: bool = True
+) -> None:
+    """Отправить уведомление о взаимном лайке обоим + (опционально) пост в РП-чат."""
     text_for_a = (
         "🎉 <b>Взаимный лайк!</b>\n\n"
         f"Партнёр: {user_b['username']}\n"
@@ -529,6 +572,9 @@ async def _notify_match(bot: Bot, user_a: dict, user_b: dict) -> None:
             await bot.send_message(uid, text)
         except (TelegramForbiddenError, TelegramBadRequest) as e:
             logger.warning("Не смог отправить уведомление о мэтче user=%s: %s", uid, e)
+
+    if not post_to_chat:
+        return
 
     # Пост в РП-чат с тегом обоих
     chat_text = (
@@ -554,6 +600,361 @@ async def _notify_someone_liked(bot: Bot, target_user_id: int, liker_id: int) ->
         logger.warning(
             "Не смог отправить уведомление о лайке user=%s: %s", target_user_id, e
         )
+
+
+# --- Админ: список анкет, бан/разбан --------------------------------------
+
+
+def admin_profile_keyboard(user_id: int, banned: bool) -> InlineKeyboardMarkup:
+    if banned:
+        ban_button = InlineKeyboardButton(
+            text="✅ Разбанить", callback_data=f"admin:unban:{user_id}"
+        )
+    else:
+        ban_button = InlineKeyboardButton(
+            text="🚫 Забанить", callback_data=f"admin:ban:{user_id}"
+        )
+    delete_button = InlineKeyboardButton(
+        text="🗑 Удалить анкету", callback_data=f"admin:delete:{user_id}"
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[ban_button], [delete_button]])
+
+
+def admin_delete_confirm_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⚠️ Точно удалить", callback_data=f"admin:delok:{user_id}"
+                ),
+                InlineKeyboardButton(
+                    text="↩️ Отмена", callback_data=f"admin:delno:{user_id}"
+                ),
+            ]
+        ]
+    )
+
+
+def admin_profile_card(index: int, profile: dict) -> str:
+    banned = bool(profile.get("banned"))
+    status = "🚫 <b>ЗАБАНЕН</b>\n" if banned else ""
+    return (
+        f"<b>#{index}</b> {status}"
+        f"• ID: <code>{profile['user_id']}</code>\n"
+        f"• Пол персонажа: <b>{profile['char_gender']}</b>\n"
+        f"• Ищет: <b>{profile['preferred_gender']}</b>\n"
+        f"• Юз: {profile['username']}\n"
+        f"• Анкета: {profile['profile_link']}"
+    )
+
+
+async def _resolve_target(arg: str) -> tuple[int | None, str]:
+    """Преобразовать аргумент команды (ID или @username) в user_id.
+
+    Возвращает (user_id | None, человекочитаемая_подпись)."""
+    arg = arg.strip()
+    if not arg:
+        return None, arg
+    if arg.lstrip("-").isdigit():
+        return int(arg), arg
+    # Иначе — пробуем как @username
+    username = arg if arg.startswith("@") else "@" + arg
+    profile = await find_profile_by_username(username)
+    if profile:
+        return int(profile["user_id"]), username
+    return None, username
+
+
+def _origin_from_message(msg: Message) -> tuple[int | None, str]:
+    """Достать оригинальный аккаунт автора из (пересланного) сообщения.
+
+    Возвращает (user_id | None, подпись). None — если автор скрыл аккаунт
+    при пересылке или это сервисное сообщение."""
+    origin = msg.forward_origin
+    if isinstance(origin, MessageOriginUser):
+        u = origin.sender_user
+        label = ("@" + u.username) if u.username else (u.full_name or str(u.id))
+        return u.id, label
+    if origin is not None:
+        # MessageOriginHiddenUser / channel / chat — оригинальный ID недоступен.
+        return None, "скрытый аккаунт"
+    # Не пересланное — берём непосредственного автора.
+    if msg.from_user:
+        u = msg.from_user
+        label = ("@" + u.username) if u.username else (u.full_name or str(u.id))
+        return u.id, label
+    return None, "неизвестно"
+
+
+@router.message(Command("all", "list", "anketi", "anketas"))
+async def cmd_all_profiles(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        return  # тихо игнорируем не-админов
+
+    profiles = await list_all_profiles()
+    if not profiles:
+        await message.answer("Анкет пока нет.")
+        return
+
+    active = sum(1 for p in profiles if not p.get("banned"))
+    banned = len(profiles) - active
+    await message.answer(
+        f"<b>Все анкеты ({len(profiles)})</b>\n"
+        f"Активных: {active} | Забанено: {banned}\n\n"
+        "Под каждой анкетой — кнопки бана/разбана и удаления анкеты.\n"
+        "🗑 Удаление убирает анкету без бана (человек может заполнить заново).\n"
+        "Также: <code>/ban ID</code> или <code>/ban @ник</code> (и <code>/unban</code>).\n"
+        "💘 Свести двоих: <code>/match ID|@ник  ID|@ник</code> — обоим в ЛС придёт «тебя лайкнули», решают сами."
+    )
+    for index, profile in enumerate(profiles, start=1):
+        await message.answer(
+            admin_profile_card(index, profile),
+            reply_markup=admin_profile_keyboard(
+                profile["user_id"], bool(profile.get("banned"))
+            ),
+            disable_web_page_preview=True,
+        )
+
+
+async def _do_ban(message: Message, user_id: int, label: str, reason: str | None) -> None:
+    if is_admin(user_id):
+        await message.answer("Нельзя забанить администратора.")
+        return
+    await ban_user(user_id, reason)
+    suffix = f"\nПричина: {reason}" if reason else ""
+    await message.answer(
+        f"🚫 Забанен: <code>{user_id}</code> ({label}).{suffix}\n"
+        "Его анкета больше не показывается другим, и он не может пользоваться ботом."
+    )
+
+
+@router.message(Command("ban"))
+async def cmd_ban(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split(maxsplit=2)
+
+    # Вариант 1: /ban ответом на (пересланное) сообщение — банит оригинальный аккаунт.
+    if message.reply_to_message is not None:
+        reason = parts[1] if len(parts) >= 2 else None
+        user_id, label = _origin_from_message(message.reply_to_message)
+        if user_id is None:
+            await message.answer(
+                f"Не могу определить аккаунт ({label}). Скорее всего автор скрыл "
+                "ссылку на профиль при пересылке. Забань по ID/@юзернейму: "
+                "<code>/ban ID</code>."
+            )
+            return
+        await _do_ban(message, user_id, label, reason)
+        return
+
+    # Вариант 2: /ban ID|@ник [причина].
+    if len(parts) < 2:
+        await message.answer(
+            "Использование:\n"
+            "• <code>/ban ID</code> или <code>/ban @ник</code> [причина]\n"
+            "• ответь <code>/ban</code> на пересланное сообщение тролля — "
+            "забаню его оригинальный аккаунт."
+        )
+        return
+    reason = parts[2] if len(parts) == 3 else None
+    user_id, label = await _resolve_target(parts[1])
+    if user_id is None:
+        await message.answer(
+            f"Не нашла пользователя по «{label}». "
+            "Забанить можно по числовому ID или @юзернейму из анкеты."
+        )
+        return
+    await _do_ban(message, user_id, label, reason)
+
+
+@router.message(Command("unban"))
+async def cmd_unban(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer(
+            "Использование: <code>/unban ID</code> или <code>/unban @ник</code>."
+        )
+        return
+    user_id, label = await _resolve_target(parts[1])
+    if user_id is None:
+        await message.answer(
+            f"Не нашла пользователя по «{label}». Укажи числовой ID или @юзернейм."
+        )
+        return
+    removed = await unban_user(user_id)
+    if removed:
+        await message.answer(f"✅ Разбанен: <code>{user_id}</code> ({label}).")
+    else:
+        await message.answer(f"Пользователь <code>{user_id}</code> и так не в бане.")
+
+
+@router.message(Command("match", "svesti", "pair"))
+async def cmd_match(message: Message, bot: Bot) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer(
+            "Использование: <code>/match ID|@ник  ID|@ник</code>\n"
+            "Каждому в ЛС прилетит «🔔 кто-то лайкнул твою анкету» с анкетой второго "
+            "и кнопками 👍/👎. Они сами решают. Мэтч с контактами будет, только если "
+            "оба лайкнут друг друга."
+        )
+        return
+
+    id_a, label_a = await _resolve_target(parts[1])
+    id_b, label_b = await _resolve_target(parts[2])
+    if id_a is None:
+        await message.answer(
+            f"Не нашла первого ({label_a}). Укажи числовой ID или @ник из анкеты."
+        )
+        return
+    if id_b is None:
+        await message.answer(
+            f"Не нашла второго ({label_b}). Укажи числовой ID или @ник из анкеты."
+        )
+        return
+    if id_a == id_b:
+        await message.answer("Это один и тот же человек 🙂 Нужны двое разных.")
+        return
+
+    profile_a = await get_profile(id_a)
+    profile_b = await get_profile(id_b)
+    if not profile_a or not profile_b:
+        missing = label_a if not profile_a else label_b
+        await message.answer(
+            f"У {missing} нет анкеты в боте — свести не получится "
+            "(нужны заполненные анкеты у обоих)."
+        )
+        return
+
+    # Купидон: показываем каждому анкету другого как «тебя лайкнули» — без записи
+    # лайков. Они сами решают; мэтч появится, только если оба нажмут 👍.
+    await _notify_someone_liked(bot, target_user_id=id_a, liker_id=id_b)
+    await _notify_someone_liked(bot, target_user_id=id_b, liker_id=id_a)
+    await message.answer(
+        f"💘 Свожу: {profile_a['username']} ↔ {profile_b['username']}\n"
+        "Обоим в ЛС ушло «кто-то лайкнул твою анкету» с анкетой друг друга. "
+        "Решают сами — мэтч с контактами будет, только если оба лайкнут."
+    )
+
+
+@router.message(F.forward_origin)
+async def admin_forwarded_message(message: Message) -> None:
+    """Админ переслал сообщение боту → показываем кнопку бана оригинального аккаунта."""
+    if not is_admin(message.from_user.id):
+        return
+    user_id, label = _origin_from_message(message)
+    if user_id is None:
+        await message.answer(
+            f"Не могу определить оригинальный аккаунт ({label}) — автор скрыл "
+            "ссылку на профиль при пересылке. Забань по ID/@юзернейму: "
+            "<code>/ban ID</code>."
+        )
+        return
+    if is_admin(user_id):
+        await message.answer("Это твой аккаунт — банить его нельзя 🙂")
+        return
+    banned = await is_banned(user_id)
+    status = "🚫 Уже забанен." if banned else ""
+    await message.answer(
+        f"Автор пересланного сообщения: {label}\n"
+        f"ID: <code>{user_id}</code>\n{status}".rstrip(),
+        reply_markup=admin_profile_keyboard(user_id, banned),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:"))
+async def cb_admin_ban(cb: CallbackQuery) -> None:
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    parts = cb.data.split(":")
+    if len(parts) != 3 or parts[1] not in (
+        "ban", "unban", "delete", "delok", "delno"
+    ):
+        await cb.answer("Неизвестное действие", show_alert=True)
+        return
+    action = parts[1]
+    try:
+        target_id = int(parts[2])
+    except ValueError:
+        await cb.answer("Невалидный ID", show_alert=True)
+        return
+
+    # --- Удаление анкеты (с подтверждением) ---
+    if action == "delete":
+        await cb.answer()
+        try:
+            await cb.message.edit_reply_markup(
+                reply_markup=admin_delete_confirm_keyboard(target_id)
+            )
+        except TelegramBadRequest:
+            pass
+        return
+
+    if action == "delno":
+        # Отмена удаления — возвращаем обычную клавиатуру.
+        banned = await is_banned(target_id)
+        await cb.answer("Отменено")
+        try:
+            await cb.message.edit_reply_markup(
+                reply_markup=admin_profile_keyboard(target_id, banned)
+            )
+        except TelegramBadRequest:
+            pass
+        return
+
+    if action == "delok":
+        deleted = await delete_profile(target_id)
+        await cb.answer("🗑 Анкета удалена" if deleted else "Анкета не найдена")
+        try:
+            await cb.message.edit_text(
+                ("🗑 <b>Анкета удалена.</b>\n" if deleted else "Анкета уже удалена.\n")
+                + f"ID: <code>{target_id}</code>\n"
+                "Пользователь не забанен — может заново заполнить анкету через /start."
+            )
+        except TelegramBadRequest:
+            pass
+        return
+
+    if action == "ban":
+        if is_admin(target_id):
+            await cb.answer("Нельзя забанить администратора.", show_alert=True)
+            return
+        await ban_user(target_id)
+        new_banned = True
+        await cb.answer("🚫 Забанен")
+    else:
+        await unban_user(target_id)
+        new_banned = False
+        await cb.answer("✅ Разбанен")
+
+    # Обновляем карточку (статус + кнопку), чтобы было видно новое состояние.
+    profile = await get_profile(target_id)
+    try:
+        if profile:
+            status = "🚫 <b>ЗАБАНЕН</b>\n" if new_banned else ""
+            await cb.message.edit_text(
+                status
+                + f"• ID: <code>{profile['user_id']}</code>\n"
+                f"• Пол персонажа: <b>{profile['char_gender']}</b>\n"
+                f"• Ищет: <b>{profile['preferred_gender']}</b>\n"
+                f"• Юз: {profile['username']}\n"
+                f"• Анкета: {profile['profile_link']}",
+                reply_markup=admin_profile_keyboard(target_id, new_banned),
+                disable_web_page_preview=True,
+            )
+        else:
+            # Анкеты нет (забанили по ID без анкеты) — обновим только кнопку.
+            await cb.message.edit_reply_markup(
+                reply_markup=admin_profile_keyboard(target_id, new_banned)
+            )
+    except TelegramBadRequest:
+        pass
 
 
 # --- Запуск --------------------------------------------------------------

@@ -1,0 +1,30 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Declares a free-tier Docker web service for the RP Tinder Bot.
+# Required secrets (set in the Render dashboard before deploying):
+#   BOT_TOKEN      — Telegram bot token from @BotFather
+#   DATABASE_URL   — Neon Postgres pooled connection string
+#   REQUIRED_CHAT_ID — Telegram chat ID of the RP group
+#
+# UptimeRobot: add an HTTP(S) monitor pointing at
+#   https://<service>.onrender.com/healthz  (interval 5 min)
+# to prevent the free-tier service from sleeping.
+
+services:
+  - type: web
+    name: rp-tinder-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: REQUIRED_CHAT_ID
+        sync: false
+      - key: PORT
+        value: "8000"
+      # Optional:
+      #   REQUIRED_CHAT_LINK — invite link shown to non-members
+      #   WEBHOOK_URL        — override auto-derived RENDER_EXTERNAL_URL
